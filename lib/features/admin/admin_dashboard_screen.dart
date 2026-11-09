@@ -1,0 +1,765 @@
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+import 'package:provider/provider.dart';
+
+import '../../app/theme.dart';
+import '../../core/formatters.dart';
+import '../../data/api/admin_api.dart';
+import '../../data/api/product_api.dart';
+import '../../data/models/cron_status.dart';
+import '../../data/models/order.dart';
+import '../../data/models/product.dart';
+import '../../data/models/reports.dart';
+import '../../state/async_controller.dart';
+import '../../widgets/empty_view.dart';
+import '../../widgets/error_view.dart';
+import '../../widgets/loading_skeleton.dart';
+import '../../widgets/product_image.dart';
+import '../../widgets/product_placeholder.dart';
+import '../../widgets/section_card.dart';
+import '../../widgets/status_badge.dart';
+
+class AdminDashboardScreen extends StatefulWidget {
+  const AdminDashboardScreen({super.key});
+
+  @override
+  State<AdminDashboardScreen> createState() => _AdminDashboardScreenState();
+}
+
+class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
+  late final AsyncController<SalesReportResponse> _sales;
+  late final AsyncController<OrderReportResponse> _orderReport;
+  late final AsyncController<ProductReportResponse> _productReport;
+  late final AsyncController<CustomerReportResponse> _customerReport;
+  late final AsyncController<List<OrderResponse>> _orders;
+  late final AsyncController<List<ProductResponse>> _products;
+  late final AsyncController<CronStatusResponse> _cron;
+
+  List<AsyncController<Object?>> get _all => [
+    _sales,
+    _orderReport,
+    _productReport,
+    _customerReport,
+    _orders,
+    _products,
+    _cron,
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    final admin = context.read<AdminApi>();
+    final products = context.read<ProductApi>();
+    _sales = AsyncController(admin.salesReport);
+    _orderReport = AsyncController(admin.orderReport);
+    _productReport = AsyncController(admin.productReport);
+    _customerReport = AsyncController(admin.customerReport);
+    _orders = AsyncController(admin.orders);
+    _products = AsyncController(products.list);
+    _cron = AsyncController(admin.cronStatus);
+    _refreshAll();
+  }
+
+  Future<void> _refreshAll() => Future.wait(_all.map((c) => c.load()));
+
+  @override
+  void dispose() {
+    for (final c in _all) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RefreshIndicator(
+      onRefresh: _refreshAll,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final wide = constraints.maxWidth >= 720;
+          final kpiColumns = constraints.maxWidth >= 900
+              ? 4
+              : constraints.maxWidth >= 560
+              ? 3
+              : 2;
+
+          final lists = [
+            _RecentOrdersCard(controller: _orders),
+            _LowStockCard(controller: _products),
+          ];
+
+          return ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+            children: [
+              const _ReportsHeader(),
+              const SizedBox(height: 12),
+              _KpiGrid(
+                columns: kpiColumns,
+                sales: _sales,
+                orderReport: _orderReport,
+                productReport: _productReport,
+                customerReport: _customerReport,
+              ),
+              const SizedBox(height: 16),
+              if (wide)
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(child: lists[0]),
+                    const SizedBox(width: 16),
+                    Expanded(child: lists[1]),
+                  ],
+                )
+              else ...[
+                lists[0],
+                const SizedBox(height: 16),
+                lists[1],
+              ],
+              const SizedBox(height: 16),
+              _CronCard(controller: _cron),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _ReportsHeader extends StatelessWidget {
+  const _ReportsHeader();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Semantics(
+          header: true,
+          child: Text('Reports', style: theme.textTheme.titleLarge),
+        ),
+        const SizedBox(height: 4),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Padding(
+              padding: EdgeInsets.only(top: 1),
+              child: Icon(
+                Icons.info_outline,
+                size: 16,
+                color: AppColors.inkMuted,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                'Generated by the reporting service from its own database, so '
+                'figures may differ from the live lists below. Totals include '
+                'cancelled orders.',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: AppColors.inkMuted,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+class _Kpi {
+  const _Kpi(this.label, this.value, this.icon, {this.caption});
+
+  final String label;
+  final String value;
+  final IconData icon;
+  final String? caption;
+}
+
+class _KpiGrid extends StatelessWidget {
+  const _KpiGrid({
+    required this.columns,
+    required this.sales,
+    required this.orderReport,
+    required this.productReport,
+    required this.customerReport,
+  });
+
+  final int columns;
+  final AsyncController<SalesReportResponse> sales;
+  final AsyncController<OrderReportResponse> orderReport;
+  final AsyncController<ProductReportResponse> productReport;
+  final AsyncController<CustomerReportResponse> customerReport;
+
+  @override
+  Widget build(BuildContext context) {
+    final tiles = <Widget>[
+      _ReportTile<SalesReportResponse>(
+        controller: sales,
+        title: 'Total revenue',
+        icon: Icons.payments_outlined,
+        kpi: (r) => _Kpi(
+          'Total revenue',
+          Formatters.currency(r.totalRevenue),
+          Icons.payments_outlined,
+          caption: '${Formatters.integer(r.totalOrders)} orders',
+        ),
+      ),
+      _ReportTile<OrderReportResponse>(
+        controller: orderReport,
+        title: 'Total orders',
+        icon: Icons.receipt_long_outlined,
+        kpi: (r) => _Kpi(
+          'Total orders',
+          Formatters.integer(r.totalOrders),
+          Icons.receipt_long_outlined,
+          caption: 'Avg ${Formatters.currency(r.averageOrderValue)}',
+        ),
+      ),
+      _ReportTile<OrderReportResponse>(
+        controller: orderReport,
+        title: 'Completed vs cancelled',
+        icon: Icons.fact_check_outlined,
+        kpi: (r) => _Kpi(
+          'Completed vs cancelled',
+          '${Formatters.integer(r.completedOrders)} / '
+              '${Formatters.integer(r.cancelledOrders)}',
+          Icons.fact_check_outlined,
+          caption: 'Sales ${Formatters.currency(r.totalSales)}',
+        ),
+      ),
+      _ReportTile<ProductReportResponse>(
+        controller: productReport,
+        title: 'Total products',
+        icon: Icons.inventory_2_outlined,
+        kpi: (r) => _Kpi(
+          'Total products',
+          Formatters.integer(r.totalProducts),
+          Icons.inventory_2_outlined,
+          caption: 'Avg price ${Formatters.currency(r.averagePrice)}',
+        ),
+      ),
+      _ReportTile<ProductReportResponse>(
+        controller: productReport,
+        title: 'Active products',
+        icon: Icons.toggle_on_outlined,
+        kpi: (r) => _Kpi(
+          'Active products',
+          Formatters.integer(r.activeProducts),
+          Icons.toggle_on_outlined,
+          caption:
+              '${Formatters.integer(r.totalProducts - r.activeProducts)} inactive',
+        ),
+      ),
+      _ReportTile<ProductReportResponse>(
+        controller: productReport,
+        title: 'Total stock',
+        icon: Icons.warehouse_outlined,
+        kpi: (r) => _Kpi(
+          'Total stock',
+          Formatters.integer(r.totalStockQuantity),
+          Icons.warehouse_outlined,
+          caption: 'units',
+        ),
+      ),
+      _ReportTile<CustomerReportResponse>(
+        controller: customerReport,
+        title: 'Total customers',
+        icon: Icons.people_outline,
+        kpi: (r) => _Kpi(
+          'Total customers',
+          Formatters.integer(r.totalCustomers),
+          Icons.people_outline,
+          caption:
+              '${Formatters.integer(r.distinctCustomerEmails)} distinct emails',
+        ),
+      ),
+      _ReportTile<SalesReportResponse>(
+        controller: sales,
+        title: 'Best-selling product',
+        icon: Icons.emoji_events_outlined,
+        kpi: (r) => _Kpi(
+          'Best-selling product',
+          r.bestSellingProduct ?? 'No sales yet',
+          Icons.emoji_events_outlined,
+          caption: r.bestSellingProduct == null
+              ? null
+              : '${Formatters.integer(r.bestSellingQuantity)} sold',
+        ),
+      ),
+    ];
+
+    const spacing = 12.0;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width =
+            (constraints.maxWidth - spacing * (columns - 1)) / columns;
+        return Wrap(
+          spacing: spacing,
+          runSpacing: spacing,
+          children: [
+            for (final t in tiles)
+              SizedBox(width: width, height: 122, child: t),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _ReportTile<T> extends StatelessWidget {
+  const _ReportTile({
+    required this.controller,
+    required this.title,
+    required this.icon,
+    required this.kpi,
+  });
+
+  final AsyncController<T> controller;
+  final String title;
+  final IconData icon;
+  final _Kpi Function(T report) kpi;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: ListenableBuilder(
+          listenable: controller,
+          builder: (context, _) {
+            final data = controller.data;
+            final error = controller.error;
+
+            Widget header(String label) => Row(
+              children: [
+                Icon(icon, size: 18, color: theme.colorScheme.primary),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.labelMedium?.copyWith(
+                      color: AppColors.inkMuted,
+                    ),
+                  ),
+                ),
+              ],
+            );
+
+            if (error != null && !controller.isLoading) {
+              final info = ErrorInfo.from(error);
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  header(title),
+                  const Spacer(),
+                  Text(
+                    info.title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: AppColors.danger,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  if (info.retryable)
+                    SizedBox(
+                      height: 32,
+                      child: TextButton(
+                        style: TextButton.styleFrom(
+                          padding: EdgeInsets.zero,
+                          minimumSize: const Size(48, 32),
+                        ),
+                        onPressed: controller.load,
+                        child: const Text('Retry'),
+                      ),
+                    ),
+                ],
+              );
+            }
+
+            if (data == null) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  header(title),
+                  const Spacer(),
+                  const SkeletonBox(height: 22, width: 90),
+                  const SizedBox(height: 8),
+                  const SkeletonBox(height: 10, width: 60),
+                ],
+              );
+            }
+
+            final k = kpi(data);
+            return Semantics(
+              label:
+                  '${k.label}: ${k.value}'
+                  '${k.caption == null ? '' : ', ${k.caption}'}',
+              excludeSemantics: true,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  header(k.label),
+                  const Spacer(),
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      k.value,
+                      maxLines: 1,
+                      style: theme.textTheme.titleLarge?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  if (k.caption != null) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      k.caption!,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: AppColors.inkMuted,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _ListSection<T> extends StatelessWidget {
+  const _ListSection({required this.controller, required this.builder});
+
+  final AsyncController<T> controller;
+  final Widget Function(T data) builder;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: controller,
+      builder: (context, _) {
+        final data = controller.data;
+        final error = controller.error;
+        if (error != null && !controller.isLoading) {
+          return ErrorView(
+            error: error,
+            onRetry: controller.load,
+            compact: true,
+          );
+        }
+        if (data == null) return const ListSkeleton();
+        return builder(data);
+      },
+    );
+  }
+}
+
+class _RecentOrdersCard extends StatelessWidget {
+  const _RecentOrdersCard({required this.controller});
+
+  final AsyncController<List<OrderResponse>> controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return SectionCard(
+      title: 'Recent orders',
+      subtitle: 'Latest 8, live',
+      icon: Icons.receipt_long_outlined,
+      child: _ListSection<List<OrderResponse>>(
+        controller: controller,
+        builder: (orders) {
+          if (orders.isEmpty) {
+            return const EmptyView(
+              compact: true,
+              icon: Icons.receipt_long_outlined,
+              title: 'No orders yet',
+            );
+          }
+          final recent = [...orders]
+            ..sort((a, b) => b.orderDate.compareTo(a.orderDate));
+          final shown = recent.take(8).toList();
+          return Column(
+            children: [
+              for (var i = 0; i < shown.length; i++) ...[
+                if (i > 0) const Divider(height: 1),
+                _OrderRow(order: shown[i]),
+              ],
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _OrderRow extends StatelessWidget {
+  const _OrderRow({required this.order});
+
+  final OrderResponse order;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return MergeSemantics(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    order.orderNumber,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    order.customer.fullName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall,
+                  ),
+                  Text(
+                    Formatters.dateTime(order.orderDate),
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: AppColors.inkMuted,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  Formatters.currency(order.totalAmount),
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                StatusBadge.order(order.status),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _LowStockCard extends StatelessWidget {
+  const _LowStockCard({required this.controller});
+
+  final AsyncController<List<ProductResponse>> controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return SectionCard(
+      title: 'Low stock',
+      subtitle: '5 units or fewer, live',
+      icon: Icons.warning_amber_rounded,
+      child: _ListSection<List<ProductResponse>>(
+        controller: controller,
+        builder: (products) {
+          final low = products.where((p) => p.isLowStock).toList()
+            ..sort((a, b) => a.quantityInStock.compareTo(b.quantityInStock));
+          if (low.isEmpty) {
+            return const EmptyView(
+              compact: true,
+              icon: Icons.check_circle_outline,
+              title: 'All products are well stocked',
+            );
+          }
+          return Column(
+            children: [
+              for (var i = 0; i < low.length; i++) ...[
+                if (i > 0) const Divider(height: 1),
+                InkWell(
+                  borderRadius: BorderRadius.circular(8),
+                  onTap: () => context.push(
+                    '/admin/products/${low[i].id}/edit',
+                    extra: low[i],
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    child: Row(
+                      children: [
+                        SizedBox(
+                          width: 40,
+                          height: 40,
+                          child: ProductImage(
+                            url: low[i].coverImage,
+                            seed: low[i].id,
+                            name: low[i].name,
+                            size: PlaceholderSize.avatar,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                low[i].name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: theme.textTheme.bodyMedium?.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              Text(
+                                '${low[i].sku}${low[i].active ? '' : ' · inactive'}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  color: AppColors.inkMuted,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Text(
+                              '${low[i].quantityInStock} left',
+                              style: theme.textTheme.bodyMedium?.copyWith(
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            StatusBadge.stock(low[i]),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _CronCard extends StatelessWidget {
+  const _CronCard({required this.controller});
+
+  final AsyncController<CronStatusResponse> controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return SectionCard(
+      title: 'Scheduled jobs',
+      subtitle: 'Cron service status',
+      icon: Icons.schedule,
+      child: _ListSection<CronStatusResponse>(
+        controller: controller,
+        builder: (s) => Column(
+          children: [
+            _CronRow(
+              label: 'Every minute',
+              run: s.lastMinuteRun,
+              reportId: s.lastMinuteReportId,
+            ),
+            const Divider(height: 1),
+            _CronRow(
+              label: 'Midnight',
+              run: s.lastMidnightRun,
+              reportId: s.lastMidnightReportId,
+            ),
+            const Divider(height: 1),
+            _CronRow(
+              label: 'Sunday',
+              run: s.lastSundayRun,
+              reportId: s.lastSundayReportId,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CronRow extends StatelessWidget {
+  const _CronRow({required this.label, this.run, this.reportId});
+
+  final String label;
+  final DateTime? run;
+  final String? reportId;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final hasRun = run != null;
+    return MergeSemantics(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        child: Row(
+          children: [
+            Icon(
+              hasRun ? Icons.check_circle : Icons.hourglass_empty,
+              size: 20,
+              color: hasRun ? AppColors.success : AppColors.inkMuted,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    label,
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  if (reportId != null)
+                    Text(
+                      'Report $reportId',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: AppColors.inkMuted,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              hasRun ? Formatters.dateTime(run!) : 'Not run since restart',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: hasRun ? AppColors.ink : AppColors.inkMuted,
+                fontStyle: hasRun ? null : FontStyle.italic,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
